@@ -1,170 +1,134 @@
 """
-sd-webui-TCFG — Tangential Damping CFG for Forge-derived WebUIs
-================================================================
-Location: extensions/sd-webui-TCFG/scripts/sd_webui_tcfg.py
-
+sd_webui_tcfg/core.py
+=====================
+TCFG — Tangential Damping Classifier-Free Guidance
 Paper: arXiv:2503.18137
 
-Hook: set_model_sampler_pre_cfg_function  (Pre-CFG, same tier as SkimmedCFG)
+Algorithm:
+    Before CFG is computed, the uncond noise score is projected onto the
+    principal direction of the [uncond, cond] noise score matrix via SVD.
+    This removes the tangential component of uncond relative to cond,
+    reducing unwanted directional drift in the guidance.
 
-Compatibility:
-    ✅  reForge / Forge Classic / Forge (lllyasviel) / Forge Neo
-    ❌  A1111 — no Forge backend
+    1. Convert denoised predictions → noise scores (epsilon = x_t − x0)
+    2. Stack [uncond_noise, cond_noise] → (B, 2, H*W) matrix
+    3. SVD → take first right singular vector v1
+    4. uncond_td = project(uncond_noise, v1)   (principal direction only)
+    5. Convert back → denoised space
+    6. Standard CFG proceeds with the damped uncond
 
-Sorting priority: 13.0
-    Runs before SkimmedCFG (14) so TCFG-damped uncond feeds into SkimmedCFG.
+Hook type: set_model_sampler_pre_cfg_function  (same tier as SkimmedCFG)
 
-    Processing order when all three are active:
-        TCFG (Pre-CFG, 13.0) → SkimmedCFG (Pre-CFG, 14) → CFG → MaHiRo (Post-CFG, 15.5)
+Original implementation:
+    Shiba-2-shiba/TCFG-APG-Mahiro-for-ForgeClassic (forge_tcfg.py)
 """
 
-import logging
-import os
-import sys
-import traceback
-from functools import partial
-from typing import Any
+import torch
 
-import gradio as gr
-from modules import scripts, script_callbacks
-
-# ---------------------------------------------------------------------------
-# sys.path — ensure the extension root is importable
-# ---------------------------------------------------------------------------
-_EXT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if _EXT_ROOT not in sys.path:
-    sys.path.insert(0, _EXT_ROOT)
-# ---------------------------------------------------------------------------
-
-from sd_webui_tcfg import apply_tcfg, remove_tcfg_patches
-
-logger = logging.getLogger(__name__)
+MARKER = "sd_webui_tcfg_v1"
 
 
 # ---------------------------------------------------------------------------
-# Backend detection
+# Core algorithm
 # ---------------------------------------------------------------------------
 
-def _has_forge_backend(p) -> bool:
-    return hasattr(p, "sd_model") and hasattr(p.sd_model, "forge_objects")
-
-
-def _warn_no_forge() -> None:
-    msg = (
-        "[sd-webui-TCFG] Requires Forge backend "
-        "(reForge / Forge Classic / Forge Neo / Forge). "
-        "A1111 is not supported."
-    )
-    logger.warning(msg)
-    print(msg)
-
-
-# ---------------------------------------------------------------------------
-# Script
-# ---------------------------------------------------------------------------
-
-class TCFGScript(scripts.Script):
+@torch.no_grad()
+def score_tangential_damping(
+    cond_score: torch.Tensor,
+    uncond_score: torch.Tensor,
+) -> torch.Tensor:
     """
-    TCFG — Tangential Damping CFG.
+    Project uncond noise score onto the principal SVD direction of
+    the stacked [uncond, cond] noise score matrix.
 
-    Sorting priority 13.0 ensures this runs BEFORE SkimmedCFG (14),
-    so SkimmedCFG receives the TCFG-damped uncond as its input.
+    Args:
+        cond_score:   (B, C, H, W) — noise prediction for conditioned pass
+        uncond_score: (B, C, H, W) — noise prediction for unconditional pass
+
+    Returns:
+        uncond_td: (B, C, H, W) — tangentially damped uncond noise score
     """
+    B = cond_score.shape[0]
+    cond_flat   = cond_score.reshape(B, 1, -1).float()   # (B, 1, N)
+    uncond_flat = uncond_score.reshape(B, 1, -1).float()  # (B, 1, N)
 
-    sorting_priority = 13.0
+    # Stack into (B, 2, N) matrix; SVD is computed per-sample in the batch
+    score_matrix = torch.cat([uncond_flat, cond_flat], dim=1)
 
-    def __init__(self):
-        self.enabled = False
-
-    def title(self) -> str:
-        return "TCFG"
-
-    def show(self, is_img2img: bool):
-        return scripts.AlwaysVisible
-
-    def ui(self, is_img2img: bool):
-        with gr.Accordion(open=False, label=self.title()):
-            gr.HTML(
-                "<p><i>"
-                "<b>Pre-CFG</b>: Damps the tangential component of the unconditional "
-                "score via SVD, reducing directional drift in guidance."
-                "</i></p>"
-            )
-            enabled = gr.Checkbox(label="Enable TCFG", value=False)
-
-        enabled.change(fn=lambda x: self._update_enabled(x), inputs=[enabled])
-        return [enabled]
-
-    def _update_enabled(self, value: bool) -> None:
-        self.enabled = value
-
-    def process_before_every_sampling(self, p, *args, **kwargs):
-        if len(args) >= 1:
-            self.enabled = bool(args[0])
-        else:
-            logger.warning("[TCFG] process_before_every_sampling: missing args")
-            return
-
-        # XYZ Grid override
-        xyz = getattr(p, "_tcfg_xyz", {})
-        if "enabled" in xyz:
-            self.enabled = (xyz["enabled"] == "True")
-
-        if not self.enabled:
-            return
-
-        if not _has_forge_backend(p):
-            _warn_no_forge()
-            return
-
-        unet = p.sd_model.forge_objects.unet.clone()
-        apply_tcfg(unet)
-        p.sd_model.forge_objects.unet = unet
-
-        p.extra_generation_params.update({"tcfg": "enabled"})
-        logger.debug("[TCFG] applied")
-
-
-# ---------------------------------------------------------------------------
-# XYZ Grid support
-# ---------------------------------------------------------------------------
-
-def _set_xyz_value(p, x: Any, xs: Any, *, field: str) -> None:
-    if not hasattr(p, "_tcfg_xyz"):
-        p._tcfg_xyz = {}
-    p._tcfg_xyz[field] = x
-
-
-def _register_xyz_axes() -> None:
-    xyz_grid = None
-    for script in scripts.scripts_data:
-        if script.script_class.__module__ == "xyz_grid.py":
-            xyz_grid = script.module
-            break
-
-    if xyz_grid is None:
-        return
-
-    new_axes = [
-        xyz_grid.AxisOption(
-            "(TCFG) Enabled",
-            str,
-            partial(_set_xyz_value, field="enabled"),
-            choices=lambda: ["True", "False"],
-        ),
-    ]
-
-    if not any(x.label.startswith("(TCFG)") for x in xyz_grid.axis_options):
-        xyz_grid.axis_options.extend(new_axes)
-
-
-def _on_before_ui() -> None:
     try:
-        _register_xyz_axes()
-    except Exception:
-        print(
-            f"[sd-webui-TCFG] XYZ Grid registration failed:\n{traceback.format_exc()}"
-        )
+        _, _, Vh = torch.linalg.svd(score_matrix, full_matrices=False)
+    except RuntimeError:
+        # CUDA SVD can fail on some hardware/drivers; fall back to CPU
+        _, _, Vh = torch.linalg.svd(score_matrix.cpu(), full_matrices=False)
+        Vh = Vh.to(uncond_flat.device)
+
+    v1 = Vh[:, 0:1, :]  # (B, 1, N) — first right singular vector
+
+    # Project uncond onto v1 (retain only the principal direction)
+    uncond_td = (uncond_flat @ v1.transpose(-2, -1)) * v1  # (B, 1, N)
+
+    return uncond_td.reshape_as(uncond_score).to(uncond_score.dtype)
 
 
-script_callbacks.on_before_ui(_on_before_ui)
+# ---------------------------------------------------------------------------
+# Pre-CFG hook
+# ---------------------------------------------------------------------------
+
+@torch.no_grad()
+def _tcfg_pre_cfg_fn(args: dict) -> list:
+    """
+    Pre-CFG function registered via set_model_sampler_pre_cfg_function.
+
+    Receives denoised predictions; converts to noise space for SVD damping,
+    then converts the damped uncond back to denoised space.
+    Standard CFG proceeds unchanged after this modification.
+    """
+    conds_out = args["conds_out"]   # [cond_denoised, uncond_denoised]
+    x_orig    = args["input"]       # x_t (noisy latent)
+
+    # conds_out[0] = positive (cond), conds_out[1] = negative (uncond)
+    # If uncond is zeroed (CFG scale = 1 or uncond disabled), skip
+    if not torch.any(conds_out[1]):
+        return conds_out
+
+    cond_denoised   = conds_out[0]
+    uncond_denoised = conds_out[1]
+
+    # Denoised → noise (epsilon) space
+    cond_noise   = x_orig - cond_denoised
+    uncond_noise = x_orig - uncond_denoised
+
+    # Tangential damping on uncond noise
+    uncond_td_noise = score_tangential_damping(cond_noise, uncond_noise)
+
+    # Noise → denoised space
+    conds_out[1] = x_orig - uncond_td_noise
+
+    return conds_out
+
+
+# Marker for identification / deduplication
+_tcfg_pre_cfg_fn._sd_webui_tcfg_marker = MARKER
+
+
+# ---------------------------------------------------------------------------
+# Public helpers
+# ---------------------------------------------------------------------------
+
+def _is_tcfg_fn(fn) -> bool:
+    return getattr(fn, "_sd_webui_tcfg_marker", None) == MARKER
+
+
+def remove_tcfg_patches(unet) -> None:
+    """Remove all TCFG pre_cfg_function patches from unet.model_options."""
+    key = "sampler_pre_cfg_function"
+    existing = unet.model_options.get(key, [])
+    if isinstance(existing, list):
+        unet.model_options[key] = [fn for fn in existing if not _is_tcfg_fn(fn)]
+
+
+def apply_tcfg(unet):
+    """Apply TCFG pre_cfg_function to unet exclusively (deduplicates)."""
+    remove_tcfg_patches(unet)
+    unet.set_model_sampler_pre_cfg_function(_tcfg_pre_cfg_fn)
+    return unet
