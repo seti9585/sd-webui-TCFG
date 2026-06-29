@@ -92,24 +92,55 @@ class TCFGScript(scripts.Script):
             )
             enabled = gr.Checkbox(label="Enable TCFG", value=False)
 
-        enabled.change(fn=lambda x: self._update_enabled(x), inputs=[enabled])
+        # Infotext round-trip (PNG Info -> Send to txt2img / img2img).
+        # The Enable checkbox is bound through a callable because infotext paste
+        # leaves a component untouched when its key is absent (Forge Neo ->
+        # gr.skip(), reForge -> gr.update() no-op); a bare key could never turn
+        # TCFG off. The callable resolves a missing "tcfg" key to False, forcing
+        # OFF when an image generated without TCFG is sent. The metadata itself
+        # is written in process() (see below).
+        #
+        # NOTE: no enabled.change() listener is registered here. A previous
+        # version synced an instance flag via change(), but that value was always
+        # overwritten by the UI args read in process_before_every_sampling(), so
+        # it was dead code; removing it also keeps the checkbox clear of any event
+        # listener that could interfere with the paste update.
+        self.infotext_fields = [
+            (enabled, lambda d: d.get("tcfg", "") == "enabled"),
+        ]
+
         return [enabled]
 
-    def _update_enabled(self, value: bool) -> None:
-        self.enabled = value
+    # ------------------------------------------------------------------
+    # Effective enable state (UI checkbox + XYZ Grid override)
+    # ------------------------------------------------------------------
 
-    def process_before_every_sampling(self, p, *args, **kwargs):
-        if len(args) >= 1:
-            self.enabled = bool(args[0])
-        else:
-            logger.warning("[TCFG] process_before_every_sampling: missing args")
-            return
-
-        # XYZ Grid override
+    def _effective_enabled(self, p, args) -> bool:
+        enabled = bool(args[0]) if len(args) >= 1 else False
         xyz = getattr(p, "_tcfg_xyz", {})
         if "enabled" in xyz:
-            self.enabled = (xyz["enabled"] == "True")
+            enabled = (xyz["enabled"] == "True")
+        return enabled
 
+    # ------------------------------------------------------------------
+    # Metadata write (runs once before sampling, like a normal extension)
+    # ------------------------------------------------------------------
+
+    def process(self, p, *args):
+        # Write the infotext key here, not in process_before_every_sampling().
+        # process() runs once before the batch loop and the resulting
+        # p.extra_generation_params is captured by create_infotext() for every
+        # saved image, which is required for the PNG Info round-trip to work.
+        # The XYZ override is read so the recorded value matches the run.
+        if self._effective_enabled(p, args):
+            p.extra_generation_params["tcfg"] = "enabled"
+
+    # ------------------------------------------------------------------
+    # Hook application (correct timing for forge_objects.unet)
+    # ------------------------------------------------------------------
+
+    def process_before_every_sampling(self, p, *args, **kwargs):
+        self.enabled = self._effective_enabled(p, args)
         if not self.enabled:
             return
 
@@ -120,8 +151,6 @@ class TCFGScript(scripts.Script):
         unet = p.sd_model.forge_objects.unet.clone()
         apply_tcfg(unet)
         p.sd_model.forge_objects.unet = unet
-
-        p.extra_generation_params.update({"tcfg": "enabled"})
         logger.debug("[TCFG] applied")
 
 
