@@ -56,6 +56,8 @@ Original implementation:
 """
 
 import logging
+import os
+import sys
 
 import torch
 
@@ -67,6 +69,47 @@ MARKER = "sd_webui_tcfg_v1"
 # sync manually; used only to order this extension's hook within Forge
 # Neo's sampler_post_cfg_function list relative to other SETI extensions.
 _PRIORITY = 13.0
+
+# Suite-wide debug convention: 0 = off, 1 = apply-time settings + chain
+# dump, 2 = per-step tracing.
+DEBUG_ENV_VAR = "SD_WEBUI_SETI_DEBUG"
+
+# One chain dump per sampling pass. Reset by apply_tcfg().
+_CHAIN_DUMPED = False
+
+
+def _debug_level():
+    try:
+        return int(os.environ.get(DEBUG_ENV_VAR, "0"))
+    except Exception:
+        return 0
+
+
+def _emit(level, fmt, *args):
+    """Emit to both logging and stderr. Some forks suppress module level
+    loggers, so the stderr print is required for cross-backend visibility."""
+    if _debug_level() < level:
+        return
+    try:
+        msg = (fmt % args) if args else fmt
+    except Exception:
+        msg = str(fmt)
+    text = "[TCFG] " + msg
+    logger.warning(text)
+    try:
+        print(text, file=sys.stderr, flush=True)
+    except Exception:
+        pass
+
+
+def _describe_chain(fns):
+    """Render a hook list as 'name(priority)' in actual execution order."""
+    parts = []
+    for fn in fns or []:
+        name = getattr(fn, "__name__", None) or type(fn).__name__
+        prio = getattr(fn, "_sd_webui_priority", None)
+        parts.append("%s(%s)" % (name, "-" if prio is None else prio))
+    return " -> ".join(parts) if parts else "(empty)"
 
 
 # ---------------------------------------------------------------------------
@@ -140,6 +183,53 @@ def _priority_insert_post_cfg(unet, fn) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Priority-ordered insertion for the reForge / Forge Classic pre-cfg list
+# ---------------------------------------------------------------------------
+
+def _priority_insert_pre_cfg(unet, fn, disable_cfg1_optimization: bool = False) -> None:
+    """
+    Twin of _priority_insert_post_cfg for the pre-CFG list. Identical
+    semantics, different key.
+
+    Replaces the plain append that set_model_sampler_pre_cfg_function
+    performs. That append made execution order depend on extension load
+    order, which put TCFG (13.0) at the END of the reForge pre-cfg chain --
+    the opposite of its design intent, since tangential damping is meant to
+    clean the raw uncond BEFORE the other guidance extensions reshape it.
+    Forge Neo was already correct because that path used
+    _priority_insert_post_cfg; only the reForge path was affected.
+
+    disable_cfg1_optimization mirrors the flag that
+    set_model_sampler_pre_cfg_function sets, so callers that rely on it keep
+    working. TCFG does not need it (it returns conds_out untouched when
+    uncond is all zeros), but the parameter is kept so this helper can be
+    copied verbatim into sibling extensions that do.
+
+    A new list is built rather than mutating in place, matching the
+    semantics of the backend helper, so a cloned unet never leaks the
+    change into its source.
+
+    Duplicated deliberately: each extension in this suite carries its own
+    copy so no cross-extension import dependency exists.
+    """
+    key = "sampler_pre_cfg_function"
+    existing = unet.model_options.get(key, [])
+    priority = fn._sd_webui_priority
+
+    insert_at = len(existing)
+    for i, other in enumerate(existing):
+        other_priority = getattr(other, "_sd_webui_priority", None)
+        if other_priority is not None and other_priority > priority:
+            insert_at = i
+            break
+
+    unet.model_options[key] = existing[:insert_at] + [fn] + existing[insert_at:]
+
+    if disable_cfg1_optimization:
+        unet.model_options["disable_cfg1_optimization"] = True
+
+
+# ---------------------------------------------------------------------------
 # Core algorithm
 # ---------------------------------------------------------------------------
 
@@ -194,8 +284,23 @@ def _tcfg_pre_cfg_fn(args: dict) -> list:
     then converts the damped uncond back to denoised space.
     Standard CFG proceeds unchanged after this modification.
     """
+    global _CHAIN_DUMPED
+
     conds_out = args["conds_out"]   # [cond_denoised, uncond_denoised]
     x_orig    = args["input"]       # x_t (noisy latent)
+
+    # Ground truth for pre-CFG ordering. The post-CFG chain dump lives in
+    # sd-webui-FreSca and reads sampler_post_cfg_function; it cannot see
+    # this list. Emitted once per pass, from inside the hook, so what is
+    # printed is the list as the sampler actually holds it at call time.
+    if not _CHAIN_DUMPED and _debug_level() >= 1:
+        _CHAIN_DUMPED = True
+        try:
+            opts = args.get("model_options") or {}
+            _emit(1, "pre-CFG chain: %s",
+                  _describe_chain(opts.get("sampler_pre_cfg_function")))
+        except Exception as exc:
+            _emit(1, "pre-CFG chain dump failed: %r", exc)
 
     # conds_out[0] = positive (cond), conds_out[1] = negative (uncond)
     # If uncond is zeroed (CFG scale = 1 or uncond disabled), skip
@@ -304,14 +409,21 @@ def apply_tcfg(unet):
                                     damped uncond for SkimmedCFG to use).
       * reForge / Forge Classic -> Pre-CFG (original behaviour, unchanged).
     """
+    global _CHAIN_DUMPED
+    _CHAIN_DUMPED = False   # one chain dump per sampling pass
+
     remove_tcfg_patches(unet)
 
     if _is_forge_neo_backend():
         post_fn = _make_tcfg_post_fn()
         _priority_insert_post_cfg(unet, post_fn)
-        logger.debug("[TCFG] registered post-CFG hook (Forge Neo backend)")
+        _emit(1, "registered post-CFG hook (Forge Neo), priority=%s", _PRIORITY)
     else:
-        unet.set_model_sampler_pre_cfg_function(_tcfg_pre_cfg_fn)
-        logger.debug("[TCFG] registered pre-CFG hook (reForge / Forge Classic)")
+        # v1.1: priority-ordered insertion replaces the plain append that
+        # set_model_sampler_pre_cfg_function performs. See
+        # _priority_insert_pre_cfg for why.
+        _priority_insert_pre_cfg(unet, _tcfg_pre_cfg_fn)
+        _emit(1, "registered pre-CFG hook (reForge / Forge Classic), "
+                 "priority=%s", _PRIORITY)
 
     return unet
