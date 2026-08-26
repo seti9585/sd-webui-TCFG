@@ -1,3 +1,21 @@
+# Copyright (C) 2026 seti9585
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+#
+# Derived from ComfyUI (comfy_extras/nodes_tcfg.py), Copyright (C)
+# comfyanonymous and ComfyUI contributors, licensed under GPL-3.0.
+
 """
 sd_webui_tcfg/core.py
 =====================
@@ -51,8 +69,15 @@ Composition with SkimmedCFG on Forge Neo:
     order, while leaving unrelated third-party post-cfg hooks wherever they
     already sit in the list.
 
-Original implementation:
-    Shiba-2-shiba/TCFG-APG-Mahiro-for-ForgeClassic (forge_tcfg.py)
+Provenance:
+    score_tangential_damping() and the pre-CFG conds_out rewrite
+    structure follow the ComfyUI built-in node
+    (comfy_extras/nodes_tcfg.py), which is licensed under GPL-3.0.
+    Development of this extension originally started from
+    Shiba-2-shiba/TCFG-APG-Mahiro-for-ForgeClassic, whose own
+    score_tangential_damping() is likewise a copy of the ComfyUI node;
+    that version patches set_model_sampler_cfg_function and is not the
+    structure used here. See README.md for acknowledgements.
 """
 
 import logging
