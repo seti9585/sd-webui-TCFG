@@ -6,8 +6,8 @@ Pre-CFG guidance extension for Stable Diffusion WebUI (Forge-based).
 Damps the tangential component of the unconditional score via SVD,  
 reducing directional drift in guidance.
 
-Paper: [arXiv:2503.18137](https://arxiv.org/abs/2503.18137)  
-Original implementation: [Shiba-2-shiba/TCFG-APG-Mahiro-for-ForgeClassic](https://github.com/Shiba-2-shiba/TCFG-APG-Mahiro-for-ForgeClassic)
+Paper: [arXiv:2503.18137](https://arxiv.org/abs/2503.18137) (CVPR 2025)  
+Ported from the ComfyUI built-in node [`comfy_extras/nodes_tcfg.py`](https://github.com/comfyanonymous/ComfyUI/blob/master/comfy_extras/nodes_tcfg.py)
 
 > Some WebUIs include a built-in TCFG. When this extension is enabled, it takes priority over the built-in.
 
@@ -101,8 +101,8 @@ Forge 系 WebUI 向け Pre-CFG ガイダンス拡張機能。
 SVD（特異値分解）を使って無条件スコアの接線成分を除去し、  
 ガイダンスの方向ズレを抑制します。
 
-論文: [arXiv:2503.18137](https://arxiv.org/abs/2503.18137)  
-原実装: [Shiba-2-shiba/TCFG-APG-Mahiro-for-ForgeClassic](https://github.com/Shiba-2-shiba/TCFG-APG-Mahiro-for-ForgeClassic)
+論文: [arXiv:2503.18137](https://arxiv.org/abs/2503.18137)（CVPR 2025）  
+ComfyUI ビルトインノード [`comfy_extras/nodes_tcfg.py`](https://github.com/comfyanonymous/ComfyUI/blob/master/comfy_extras/nodes_tcfg.py) からの移植
 
 > 組み込みの TCFG を持つ WebUI では、この拡張機能を有効にすると本拡張機能が優先されます。
 
@@ -188,7 +188,34 @@ TCFG は本シリーズの pre-CFG 拡張機能の中で最も小さい優先度
 
 ---
 
-## ライセンス
+## Acknowledgements / 謝辞
 
-MIT License — Original implementation: [Shiba-2-shiba](https://github.com/Shiba-2-shiba)  
-Based on: [arXiv:2503.18137](https://arxiv.org/abs/2503.18137)
+Development of this extension suite began from **Shiba-2-shiba**'s article and Forge Classic implementation, [TCFG-APG-Mahiro-for-ForgeClassic](https://github.com/Shiba-2-shiba/TCFG-APG-Mahiro-for-ForgeClassic). That work is what brought TCFG, APG and MaHiRo to the author's attention and set the direction for everything that followed. Sincere thanks.
+
+Note that the code here does not follow that implementation. It patches `set_model_sampler_cfg_function`, replacing the CFG function outright and returning the final noise prediction, which cannot compose with other guidance extensions in a chain. This extension uses the pre-CFG `conds_out` rewrite of the ComfyUI built-in node instead. The provenance statement below reflects the code, not the history.
+
+本拡張スイートの開発は、**Shiba-2-shiba** 氏の記事および Forge Classic 向け実装 [TCFG-APG-Mahiro-for-ForgeClassic](https://github.com/Shiba-2-shiba/TCFG-APG-Mahiro-for-ForgeClassic) をきっかけに始まりました。TCFG・APG・MaHiRo を知る契機となり、以降の方向性を決定づけたものです。深く感謝します。
+
+ただし本拡張のコードは同実装には倣っていません。同実装は `set_model_sampler_cfg_function` にパッチし、CFG 関数そのものを置換して最終ノイズ予測を返す方式であり、他のガイダンス拡張とチェーンを組めません。本拡張は ComfyUI ビルトインノードの pre-CFG `conds_out` 書き換え方式を採用しています。以下の典拠はコードの出所を示すものであり、開発の経緯とは別です。
+
+---
+
+## License / ライセンス
+
+**GNU General Public License v3.0** — see [LICENSE](LICENSE).
+
+Copyright (C) 2026 seti9585
+
+### Provenance / 典拠
+
+`score_tangential_damping()` and the pre-CFG `conds_out` rewrite structure are derived from the ComfyUI built-in node `comfy_extras/nodes_tcfg.py`, Copyright (C) comfyanonymous and ComfyUI contributors, licensed under GPL-3.0. This extension is therefore distributed under the same licence.
+
+Earlier releases of this repository stated MIT and named Shiba-2-shiba's repository as the original implementation. Both statements were incorrect: the code follows the ComfyUI node, and that node is GPL-3.0. Shiba-2-shiba's `score_tangential_damping()` is itself a copy of the same ComfyUI code, and that repository carries no licence file. The licence has been corrected accordingly.
+
+`score_tangential_damping()` および pre-CFG `conds_out` 書き換え構造は、ComfyUI ビルトインノード `comfy_extras/nodes_tcfg.py`（Copyright (C) comfyanonymous および ComfyUI contributors、GPL-3.0）に由来します。したがって本拡張も同一ライセンスで配布します。
+
+本リポジトリの以前のリリースは MIT を表示し、Shiba-2-shiba 氏のリポジトリを原実装として記載していました。いずれも誤りです。コードが倣っているのは ComfyUI ノードであり、同ノードは GPL-3.0 です。また Shiba-2-shiba 氏の `score_tangential_damping()` 自体が同じ ComfyUI コードの写しであり、同リポジトリにはライセンスファイルが存在しません。以上によりライセンス表記を訂正しました。
+
+### Algorithm / アルゴリズム
+
+TCFG: Tangential Damping Classifier-free Guidance — Mingi Kwon, Shin seong Kim, Jaeseok Jeong, Yi Ting Hsiao, Youngjung Uh (Yonsei University / University of Michigan), CVPR 2025. [arXiv:2503.18137](https://arxiv.org/abs/2503.18137)
