@@ -17,23 +17,36 @@
 # comfyanonymous and ComfyUI contributors, licensed under GPL-3.0.
 
 """
-sd-webui-TCFG — Tangential Damping CFG for Forge-derived WebUIs
+sd-webui-TCFG - Tangential Damping CFG for Forge-derived WebUIs
 ================================================================
 Location: extensions/sd-webui-TCFG/scripts/sd_webui_tcfg.py
 
 Paper: arXiv:2503.18137
 
-Hook: set_model_sampler_pre_cfg_function  (Pre-CFG, same tier as SkimmedCFG)
+Hook: set_model_sampler_pre_cfg_function (reForge / Forge Classic)
+      sampler_post_cfg_function (Forge Neo -- that backend calls the pre-CFG
+      hook before model evaluation, so denoised predictions are not yet
+      available there; see core.py for how the post-CFG path reconstructs
+      the equivalent result and stashes it for SkimmedCFG / DifferenceCFG /
+      APG to read)
 
 Compatibility:
-    ✅  reForge / Forge Classic / Forge (lllyasviel) / Forge Neo
-    ❌  A1111 — no Forge backend
+    [OK]  reForge / Forge Classic / Forge (lllyasviel) / Forge Neo
+    [NO]  A1111 - no Forge backend
 
-Sorting priority: 13.0
-    Runs before SkimmedCFG (14) so TCFG-damped uncond feeds into SkimmedCFG.
+_sd_webui_priority: 13.0
+    Execution order in the chain is decided by priority insertion
+    (_priority_insert_pre_cfg / _priority_insert_post_cfg in core.py), not
+    by sorting_priority below, which only controls where this extension's
+    accordion is drawn in the UI. TCFG registers at the lowest priority in
+    the suite so it runs first and receives the raw unconditional
+    prediction:
+        TCFG (13.0) -> SkimmedCFG (14.0) -> DifferenceCFG (14.2)
+        -> APG (14.5) -> CFG -> CFGZeroStar (15.0) -> FreSca (15.2)
+        -> MaHiRo (15.5) -> CFGNorm (16.0) -> CFGRegulator (16.5)
 
-    Processing order when all three are active:
-        TCFG (Pre-CFG, 13.0) → SkimmedCFG (Pre-CFG, 14) → CFG → MaHiRo (Post-CFG, 15.5)
+    Set SD_WEBUI_SETI_DEBUG=1 to have the assembled chain printed at
+    sampling time.
 """
 
 import logging
@@ -47,7 +60,7 @@ import gradio as gr
 from modules import scripts, script_callbacks
 
 # ---------------------------------------------------------------------------
-# sys.path — ensure the extension root is importable
+# sys.path - ensure the extension root is importable
 # ---------------------------------------------------------------------------
 _EXT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _EXT_ROOT not in sys.path:
@@ -83,12 +96,16 @@ def _warn_no_forge() -> None:
 
 class TCFGScript(scripts.Script):
     """
-    TCFG — Tangential Damping CFG.
+    TCFG - Tangential Damping CFG.
 
-    Sorting priority 13.0 ensures this runs BEFORE SkimmedCFG (14),
-    so SkimmedCFG receives the TCFG-damped uncond as its input.
+    sorting_priority below only controls where this accordion is drawn in
+    the UI. Execution order (TCFG running before SkimmedCFG) is decided by
+    _sd_webui_priority = 13.0 and priority insertion in core.py -- see the
+    module docstring above.
     """
 
+    # UI accordion position only. Execution order is decided separately by
+    # _sd_webui_priority = 13.0 and priority insertion in core.py.
     sorting_priority = 13.0
 
     def __init__(self):
