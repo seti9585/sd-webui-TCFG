@@ -167,6 +167,10 @@ class TCFGScript(scripts.Script):
         # p.extra_generation_params is captured by create_infotext() for every
         # saved image, which is required for the PNG Info round-trip to work.
         # The XYZ override is read so the recorded value matches the run.
+        # XYZ Grid shallow-copies p for every cell, so extra_generation_params
+        # is shared by all cells. Clear the key first so a disabled cell does
+        # not inherit "enabled" from an earlier cell.
+        p.extra_generation_params.pop("tcfg", None)
         if self._effective_enabled(p, args):
             p.extra_generation_params["tcfg"] = "enabled"
 
@@ -194,9 +198,11 @@ class TCFGScript(scripts.Script):
 # ---------------------------------------------------------------------------
 
 def _set_xyz_value(p, x: Any, xs: Any, *, field: str) -> None:
-    if not hasattr(p, "_tcfg_xyz"):
-        p._tcfg_xyz = {}
-    p._tcfg_xyz[field] = x
+    # Build a new dict instead of mutating one that may be shared with other
+    # grid cells through XYZ Grid's shallow copy of p.
+    overrides = dict(getattr(p, "_tcfg_xyz", {}) or {})
+    overrides[field] = x
+    p._tcfg_xyz = overrides
 
 
 def _register_xyz_axes() -> None:
